@@ -1,81 +1,80 @@
-import { handleVerification } from './verify_keys.js';
-import openai from './openai.mjs';
+// src/handle_request.js
 
-export async function handleRequest(request) {
+// Claude 官方 API 地址
+const TARGET_HOST = 'api.anthropic.com';
 
+export default async function handleRequest(request, env) {
   const url = new URL(request.url);
-  const pathname = url.pathname;
-  const search = url.search;
-
-  if (pathname === '/' || pathname === '/index.html') {
-    return new Response('Proxy is Running!  More Details: https://github.com/tech-shrimp/gemini-balance-lite', {
-      status: 200,
-      headers: { 'Content-Type': 'text/html' }
+  
+  // 1. 处理 CORS 预检请求 (浏览器端调用必须)
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+      },
     });
   }
 
-  if (pathname === '/verify' && request.method === 'POST') {
-    return handleVerification(request);
-  }
-
-  // 处理OpenAI格式请求
-  if (url.pathname.endsWith("/chat/completions") || url.pathname.endsWith("/completions") || url.pathname.endsWith("/embeddings") || url.pathname.endsWith("/models")) {
-    return openai.fetch(request);
-  }
-
-  const targetUrl = `https://generativelanguage.googleapis.com${pathname}${search}`;
-
-  try {
-    const headers = new Headers();
-    for (const [key, value] of request.headers.entries()) {
-      if (key.trim().toLowerCase() === 'x-goog-api-key') {
-        const apiKeys = value.split(',').map(k => k.trim()).filter(k => k);
-        if (apiKeys.length > 0) {
-          const selectedKey = apiKeys[Math.floor(Math.random() * apiKeys.length)];
-          console.log(`Gemini Selected API Key: ${selectedKey}`);
-          headers.set('x-goog-api-key', selectedKey);
-        }
-      } else {
-        if (key.trim().toLowerCase()==='content-type')
-        {
-           headers.set(key, value);
-        }
-      }
+  // 2. 提取并处理 Headers
+  const headers = new Headers(request.headers);
+  
+  // 3. 核心功能：多 Key 负载均衡
+  // Claude 客户端通常将 Key 放在 'x-api-key' 头部
+  const authHeader = headers.get('x-api-key');
+  
+  if (!authHeader) {
+     // 如果没有 Key，直接透传（有些特殊请求可能不需要），或者返回错误
+     // 这里为了兼容性，选择尝试透传，或者你可以拦截报错
+  } else {
+    // 支持使用中文或英文逗号分隔多个 Key
+    const keys = authHeader.split(/,|，/).map(k => k.trim()).filter(k => k);
+    if (keys.length > 0) {
+      // 随机选取一个 Key
+      const randomKey = keys[Math.floor(Math.random() * keys.length)];
+      // 覆盖原有的 Header，只发送选中的这一个 Key 给 Claude
+      headers.set('x-api-key', randomKey);
+      console.log(`[Load Balance] Using key: ${randomKey.slice(0, 8)}***`);
     }
+  }
 
-    console.log('Request Sending to Gemini')
-    console.log('targetUrl:'+targetUrl)
-    console.log(headers)
+  // 4. 必要的 Claude Headers 处理
+  // 确保 Host 指向 Claude，而不是你的 Worker 域名
+  headers.set('Host', TARGET_HOST);
+  // 确保 Content-Type 正确
+  if (!headers.get('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+  // 必须透传或设置 anthropic-version，如果客户端没传，默认一个
+  if (!headers.get('anthropic-version')) {
+      headers.set('anthropic-version', '2023-06-01');
+  }
 
-    const response = await fetch(targetUrl, {
-      method: request.method,
-      headers: headers,
-      body: request.body
+  // 5. 构建转发请求
+  // 保持原有路径（例如 /v1/messages）和查询参数
+  const newUrl = new URL(url.pathname + url.search, `https://${TARGET_HOST}`);
+  
+  const newRequest = new Request(newUrl, {
+    method: request.method,
+    headers: headers,
+    body: request.body,
+    redirect: 'follow',
+  });
+
+  // 6. 发送请求并处理响应
+  try {
+    const response = await fetch(newRequest);
+    
+    // 创建新的响应对象以修改 Headers (主要是 CORS)
+    const newResponse = new Response(response.body, response);
+    newResponse.headers.set('Access-Control-Allow-Origin', '*');
+    
+    return newResponse;
+  } catch (e) {
+    return new Response(JSON.stringify({ error: `Proxy Error: ${e.message}` }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' }
     });
-
-    console.log("Call Gemini Success")
-
-    const responseHeaders = new Headers(response.headers);
-
-    console.log('Header from Gemini:')
-    console.log(responseHeaders)
-
-    responseHeaders.delete('transfer-encoding');
-    responseHeaders.delete('connection');
-    responseHeaders.delete('keep-alive');
-    responseHeaders.delete('content-encoding');
-    responseHeaders.set('Referrer-Policy', 'no-referrer');
-
-    return new Response(response.body, {
-      status: response.status,
-      headers: responseHeaders
-    });
-
-  } catch (error) {
-   console.error('Failed to fetch:', error);
-   return new Response('Internal Server Error\n' + error?.stack, {
-    status: 500,
-    headers: { 'Content-Type': 'text/plain' }
-   });
+  }
 }
-};
