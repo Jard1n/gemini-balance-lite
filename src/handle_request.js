@@ -1,60 +1,77 @@
-// src/handle_request.js
+/**
+ * Claude Balance Lite - Core Logic
+ * 核心功能：解析多Key，随机负载均衡，转发至 Anthropic
+ */
 
-// Claude 官方 API 地址
 const TARGET_HOST = 'api.anthropic.com';
+const DEFAULT_VERSION = '2023-06-01'; // Claude 当前默认版本
 
 export default async function handleRequest(request, env) {
   const url = new URL(request.url);
-  
+
   // 1. 处理 CORS 预检请求 (浏览器端调用必须)
   if (request.method === 'OPTIONS') {
     return new Response(null, {
+      status: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '86400',
       },
     });
   }
 
-  // 2. 提取并处理 Headers
+  // 2. 特殊路由处理
+  // 如果访问根目录，返回简单提示
+  if (url.pathname === '/') {
+    return new Response('Claude Balance Lite is Running.', { status: 200 });
+  }
+
+  // 3. 准备请求头
   const headers = new Headers(request.headers);
   
-  // 3. 核心功能：多 Key 负载均衡
-  // Claude 客户端通常将 Key 放在 'x-api-key' 头部
+  // 移除可能暴露代理身份或导致错误的头部
+  headers.delete('Host');
+  headers.delete('cf-connecting-ip');
+  headers.delete('cf-ipcountry');
+  headers.delete('x-real-ip');
+  headers.delete('x-forwarded-for');
+  headers.delete('x-forwarded-proto');
+
+  // 4. 核心：负载均衡 Logic
+  // 客户端通常把 Key 放在 'x-api-key'
   const authHeader = headers.get('x-api-key');
   
-  if (!authHeader) {
-     // 如果没有 Key，直接透传（有些特殊请求可能不需要），或者返回错误
-     // 这里为了兼容性，选择尝试透传，或者你可以拦截报错
-  } else {
+  if (authHeader) {
     // 支持使用中文或英文逗号分隔多个 Key
+    // 例如: "sk-ant-1..., sk-ant-2..."
     const keys = authHeader.split(/,|，/).map(k => k.trim()).filter(k => k);
+    
     if (keys.length > 0) {
       // 随机选取一个 Key
       const randomKey = keys[Math.floor(Math.random() * keys.length)];
-      // 覆盖原有的 Header，只发送选中的这一个 Key 给 Claude
       headers.set('x-api-key', randomKey);
-      console.log(`[Load Balance] Using key: ${randomKey.slice(0, 8)}***`);
+      
+      // 简单混淆日志，只打印 Key 的末尾 4 位
+      const keyMask = randomKey.length > 4 ? randomKey.slice(-4) : '****';
+      console.log(`[Load Balance] Pool size: ${keys.length}, Selected Key ending in: ...${keyMask}`);
     }
   }
 
-  // 4. 必要的 Claude Headers 处理
-  // 确保 Host 指向 Claude，而不是你的 Worker 域名
+  // 5. 补充 Claude 必须的 Headers
   headers.set('Host', TARGET_HOST);
-  // 确保 Content-Type 正确
-  if (!headers.get('content-type')) {
-    headers.set('content-type', 'application/json');
-  }
-  // 必须透传或设置 anthropic-version，如果客户端没传，默认一个
+  
+  // 如果客户端没传 anthropic-version，手动补上
   if (!headers.get('anthropic-version')) {
-      headers.set('anthropic-version', '2023-06-01');
+    headers.set('anthropic-version', DEFAULT_VERSION);
   }
 
-  // 5. 构建转发请求
-  // 保持原有路径（例如 /v1/messages）和查询参数
+  // 6. 构造转发 URL
+  // 保持原有的 pathname (如 /v1/messages) 和 search 参数
   const newUrl = new URL(url.pathname + url.search, `https://${TARGET_HOST}`);
-  
+
+  // 7. 发送请求
   const newRequest = new Request(newUrl, {
     method: request.method,
     headers: headers,
@@ -62,19 +79,35 @@ export default async function handleRequest(request, env) {
     redirect: 'follow',
   });
 
-  // 6. 发送请求并处理响应
   try {
     const response = await fetch(newRequest);
-    
-    // 创建新的响应对象以修改 Headers (主要是 CORS)
-    const newResponse = new Response(response.body, response);
+
+    // 8. 处理响应
+    // 必须重新构建 Response 对象才能修改 Headers (CORS)
+    const newResponse = new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+
+    // 强制加上 CORS 头，允许任何来源
     newResponse.headers.set('Access-Control-Allow-Origin', '*');
     
     return newResponse;
-  } catch (e) {
-    return new Response(JSON.stringify({ error: `Proxy Error: ${e.message}` }), {
+
+  } catch (error) {
+    // 错误处理
+    return new Response(JSON.stringify({
+      error: {
+        type: 'proxy_error',
+        message: error.message
+      }
+    }), {
       status: 500,
-      headers: { 'content-type': 'application/json' }
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
     });
   }
 }
