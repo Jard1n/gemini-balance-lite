@@ -1,5 +1,18 @@
 {
-  "devDependencies": {
-    "wrangler": "^4.23.0"
-  }
+  "name": "claude-balance-lite",
+  "version": "1.0.0",
+  "description": "Claude API 负载均衡与国内直连代理",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "claude",
+    "proxy",
+    "balance",
+    "serverless"
+  ],
+  "author": "TechShrimp (Modified)",
+  "license": "MIT"
 }
